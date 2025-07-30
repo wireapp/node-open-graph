@@ -98,7 +98,7 @@ exports.parse = function($, options){
 			// and strict mode is not specific, then default to "og"
 			namespace = "og";
 
-	var meta = {},
+	var meta = Object.create(null),
 		metaTags = $('meta');
 
 	metaTags.each(function() {
@@ -127,7 +127,7 @@ exports.parse = function($, options){
 		while (keys.length > 1) {
 			key = keys.shift();
 
-			if (keyBlacklist.includes(key)) continue
+			if (keyBlacklist.includes(key.toLowerCase())) continue
 
 			if (Array.isArray(ptr[key])) {
 				// the last index of ptr[key] should become
@@ -142,7 +142,7 @@ exports.parse = function($, options){
 				ptr[key] = { '': ptr[key] };
 			} else if (ptr[key] === undefined) {
 				// create a new key
-				ptr[key] = {};
+				ptr[key] = Object.create(null);
 			}
 
 			// move our pointer to the next subnode
@@ -151,6 +151,7 @@ exports.parse = function($, options){
 
 		// deal with the last key
 		key = keys.shift();
+		if (keyBlacklist.includes(key.toLowerCase())) return;
 
 		if (ptr[key] === undefined) {
 			ptr[key] = content;
@@ -163,17 +164,17 @@ exports.parse = function($, options){
 
 
 	// If no 'og:title', use title tag
-	if(!meta.hasOwnProperty('title')){
-		meta['title'] = $('title').text();
-	}
+    if (!('title' in meta)) {
+    	meta.title = $('title').text();
+    }
 
 
 	// Temporary fallback for image meta.
 	// Fallback to the first image on the page.
 	// In the future, the image property could be populated
 	// with an array of images, maybe.
-	if(!meta.hasOwnProperty('image')){
-		var img = $('img');
+  	if (!('image' in meta)) {
+		const img = $('img');
 
 		// If there are image elements in the page
 		if(img.length){
