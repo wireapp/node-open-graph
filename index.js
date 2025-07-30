@@ -127,7 +127,7 @@ exports.parse = function($, options){
 		while (keys.length > 1) {
 			key = keys.shift();
 
-			if (keyBlacklist.includes(key.toLowerCase())) continue
+			if (keyBlacklist.includes(key.toLowerCase())) return;
 
 			if (Array.isArray(ptr[key])) {
 				// the last index of ptr[key] should become
