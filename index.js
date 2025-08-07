@@ -1,7 +1,12 @@
 'use strict';
 
-var	request = require('request'),
-	cheerio = require('cheerio');
+var cheerio = require('cheerio');
+var { JSDOM } = require('jsdom');
+var createDOMPurify = require('dompurify');
+
+// Create DOMPurify instance for secure sanitization
+const window = new JSDOM('').window;
+const DOMPurify = createDOMPurify(window);
 
 
 var shorthandProperties = {
@@ -16,9 +21,96 @@ var keyBlacklist = [
 	'prototype'
 ]
 
+// Sanitize content using DOMPurify + additional safety checks
+function sanitizeContent(content, options) {
+	if (!content || typeof content !== 'string') {
+		return '';
+	}
+	
+	// DOMPurify configuration for OpenGraph content (strip all HTML, keep text)
+	var purifyConfig = {
+		ALLOWED_TAGS: [], // Remove all HTML tags
+		ALLOWED_ATTR: [], // Remove all attributes  
+		KEEP_CONTENT: true, // Keep text content
+		ALLOW_DATA_ATTR: false,
+		ALLOW_UNKNOWN_PROTOCOLS: false,
+		SANITIZE_DOM: true
+	};
+	
+	// Allow custom DOMPurify config from options
+	if (options && options.sanitization) {
+		purifyConfig = Object.assign(purifyConfig, options.sanitization);
+	}
+	
+	// First pass: DOMPurify for HTML sanitization
+	var sanitized = DOMPurify.sanitize(content, purifyConfig);
+	
+	if (typeof sanitized !== 'string') {
+		return '';
+	}
+	
+	// Second pass: Additional filtering for non-HTML dangerous patterns
+	// Critical for Electron apps without contextIsolation
+	var dangerousPatterns = [
+		/javascript:/gi,
+		/vbscript:/gi, 
+		/livescript:/gi,
+		/file:/gi,
+		/data:/gi,
+		/\brequire\s*\(/gi,
+		/\bprocess\./gi,
+		/\bglobal\./gi,
+		/\bmodule\./gi,
+		/\bexports\./gi,
+		/\bchild_process\b/gi,
+		/\beval\s*\(/gi,
+		/\bFunction\s*\(/gi,
+		/\bsetTimeout\s*\(/gi,
+		/\bsetInterval\s*\(/gi
+	];
+	
+	// Remove dangerous patterns
+	dangerousPatterns.forEach(function(pattern) {
+		sanitized = sanitized.replace(pattern, '');
+	});
+	
+	// Limit content length
+	var maxLength = (options && options.maxContentLength) || 10000;
+	if (sanitized.length > maxLength) {
+		sanitized = sanitized.substring(0, maxLength);
+	}
+	
+	return sanitized.trim();
+}
+
+// Simple property key sanitization (keep existing secure logic)
+function sanitizePropertyKey(key, options) {
+	if (!key || typeof key !== 'string') {
+		return '';
+	}
+	
+	// Limit key length
+	var maxLength = (options && options.maxPropertyLength) || 200;
+	if (key.length > maxLength) {
+		return '';
+	}
+	
+	// Convert to lowercase for consistency
+	key = key.toLowerCase().trim();
+	
+	// Allow only safe characters for OpenGraph properties
+	var allowedChars = /^[a-zA-Z0-9_\-:.]+$/;
+	if (!allowedChars.test(key)) {
+		// Clean up the key
+		key = key.replace(/[^a-zA-Z0-9_\-:.]/g, '');
+	}
+	
+	return key;
+}
+
 exports = module.exports = function(url, cb, options){
   var userAgent = (options || {}).userAgent || 'NodeOpenGraphCrawler (https://github.com/samholmes/node-open-graph)'
-	exports.getHTML(url, userAgent, function(err, html){
+	exports.getHTML(url, userAgent, options, function(err, html){
 		if (err) return cb(err);
 
 		try {
@@ -33,31 +125,36 @@ exports = module.exports = function(url, cb, options){
 }
 
 
-exports.getHTML = function(url, userAgent, cb){
+exports.getHTML = function(url, userAgent, options, cb){
+	// Handle different argument patterns for backward compatibility
+	if (typeof options === 'function') {
+		cb = options;
+		options = {};
+	}
+	
+	// Handle protocol-less URLs (maintain existing behavior)
 	var purl = require('url').parse(url);
-
 	if (!purl.protocol)
-		purl = require('url').parse("http://"+url);
-
+		purl = require('url').parse("https://"+url);
 	url = require('url').format(purl);
 
-	request({
-			url: url,
-			encoding: 'utf8',
-			gzip: true,
-      jar: true,
-      headers: { 'User-Agent': userAgent },
-		},
-		function(err, res, body) {
-			if (err) return cb(err);
-
-			if (res.statusCode === 200) {
-				cb(null, body);
-			}
-			else {
-				cb(new Error("Request failed with HTTP status code: "+res.statusCode));
-			}
-		})
+	fetch(url, {
+		headers: { 
+			'User-Agent': userAgent 
+		}
+	})
+	.then(function(response) {
+		if (!response.ok) {
+			throw new Error("Request failed with HTTP status code: " + response.status);
+		}
+		return response.text();
+	})
+	.then(function(body) {
+		cb(null, body);
+	})
+	.catch(function(err) {
+		cb(err);
+	});
 }
 
 
@@ -112,14 +209,30 @@ exports.parse = function($, options){
 		var property = propertyAttr.substring(namespace.length+1),
 			content = element.attr('content');
 
+		// Sanitize content for security
+		content = sanitizeContent(content, options);
+		if (!content) return; // Skip empty content after sanitization
+
+		// Sanitize the property name first
+		property = sanitizePropertyKey(property, options);
+		if (!property) return; // Skip if property becomes invalid after sanitization
+
 		// If property is a shorthand for a longer property,
 		// Use the full property
 		property = shorthandProperties[property] || property;
-
+		
+		// Ensure property is still a valid string after shorthand lookup
+		if (!property || typeof property !== 'string') return;
 
 		var key, tmp,
 			ptr = meta,
 			keys = property.split(':', 4);
+
+		// Sanitize each key component for security
+		for (var i = 0; i < keys.length; i++) {
+			keys[i] = sanitizePropertyKey(keys[i], options);
+			if (!keys[i] && i < keys.length - 1) return; // Skip if intermediate key becomes invalid
+		}
 
 		// we want to leave one key to assign to so we always use references
 		// as long as there's one key left, we're dealing with a sub-node and not a value
@@ -165,7 +278,8 @@ exports.parse = function($, options){
 
 	// If no 'og:title', use title tag
     if (!('title' in meta)) {
-    	meta.title = $('title').text();
+    	var titleText = $('title').text();
+    	meta.title = sanitizeContent(titleText, options);
     }
 
 
@@ -179,15 +293,30 @@ exports.parse = function($, options){
 		// If there are image elements in the page
 		if(img.length){
 			var imgObj = {};
-			imgObj.url = $('img').attr('src');
+			var imgSrc = $('img').attr('src');
+			imgObj.url = sanitizeContent(imgSrc, options);
+			
+			// Only include image if URL is valid after sanitization
+			if (imgObj.url) {
+				// Set image width and height properties if respective attributes exist
+				var imgWidth = $('img').attr('width');
+				var imgHeight = $('img').attr('height');
+				
+				if(imgWidth) {
+					imgWidth = sanitizeContent(imgWidth, options);
+					if (imgWidth && /^\d+$/.test(imgWidth)) {
+						imgObj.width = imgWidth;
+					}
+				}
+				if(imgHeight) {
+					imgHeight = sanitizeContent(imgHeight, options);
+					if (imgHeight && /^\d+$/.test(imgHeight)) {
+						imgObj.height = imgHeight;
+					}
+				}
 
-			// Set image width and height properties if respective attributes exist
-			if($('img').attr('width'))
-				imgObj.width = $('img').attr('width');
-			if($('img').attr('height'))
-				imgObj.height = $('img').attr('height');
-
-			meta['image'] = imgObj;
+				meta['image'] = imgObj;
+			}
 		}
 
 	}
